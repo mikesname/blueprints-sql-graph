@@ -21,7 +21,7 @@ abstract class SqlElement implements Element {
     protected final SqlGraph graph;
 
     SqlElement(ThreadLocal<Connection> conn, SqlGraph graph, Object id) {
-        this.id = (Long)id;
+        this.id = (Long) id;
         this.conn = conn;
         this.graph = graph;
     }
@@ -34,7 +34,7 @@ abstract class SqlElement implements Element {
 
         try {
             String sql = "SELECT value FROM " + getPropTbl()
-                    + " WHERE " + getFk() + " = ? AND key = ?";
+                    + " WHERE " + getFk() + " = ? AND name = ?";
             PreparedStatement stmt = conn.get().prepareStatement(sql);
             stmt.setLong(1, (Long) id);
             stmt.setString(2, key);
@@ -57,7 +57,7 @@ abstract class SqlElement implements Element {
     public Set<String> getPropertyKeys() {
         try {
             Set<String> keys = new HashSet<String>();
-            String sql = "SELECT key FROM " + getPropTbl() + " WHERE " + getFk() + " = ?";
+            String sql = "SELECT name FROM " + getPropTbl() + " WHERE " + getFk() + " = ?";
             PreparedStatement stmt = conn.get().prepareStatement(sql);
             stmt.setLong(1, (Long) id);
             ResultSet resultSet = stmt.executeQuery();
@@ -80,10 +80,9 @@ abstract class SqlElement implements Element {
             // Ugh! 'Upsert' is complicated!
             // http://stackoverflow.com/a/6527838/285374
             // http://stackoverflow.com/a/8702291/285374
-
             // Update that will noop if the key doesn't exist...
             String update = "UPDATE " + getPropTbl() + " SET value = ?" +
-                    " WHERE " + getFk() + "=? AND key = ?";
+                    " WHERE " + getFk() + "=? AND name = ?";
             PreparedStatement updateStmt = conn.get().prepareStatement(update);
             updateStmt.setBytes(1, encoded);
             updateStmt.setLong(2, (Long) id);
@@ -91,20 +90,36 @@ abstract class SqlElement implements Element {
             updateStmt.execute();
 
             // Insert that will noop if the key *does* exist
-            String insert = "INSERT INTO " + getPropTbl() + " (" + getFk() + ", key, value)" +
-                    " SELECT ?, ?, ?" +
-                    " WHERE NOT EXISTS (SELECT 1 FROM " + getPropTbl() +
-                    " WHERE " + getFk() + " = ? AND key = ?)";
-
-            PreparedStatement insertStmt = conn.get().prepareStatement(insert);
-            insertStmt.setLong(1, (Long) id);
-            insertStmt.setString(2, key);
-            insertStmt.setBytes(3, encoded);
-            insertStmt.setLong(4, (Long) id);
-            insertStmt.setString(5, key);
+            PreparedStatement insertStmt = getNoopInsert(key, encoded);
             insertStmt.execute();
         } catch (SQLException e) {
             throw new SqlGraphException(e);
+        }
+    }
+
+    private PreparedStatement getNoopInsert(String key, byte[] encoded)
+            throws SQLException {
+        // Sigh... can't find a no-op insert syntax that works for
+        // both Postgres and Mysql...
+        if (graph.getJdbcUrl().contains("mysql")) {
+            String sql = "INSERT IGNORE INTO " + getPropTbl() + " (" + getFk() + ", name, value) VALUES (?,?,?)";
+            PreparedStatement stmt = conn.get().prepareStatement(sql);
+            stmt.setLong(1, (Long) id);
+            stmt.setString(2, key);
+            stmt.setBytes(3, encoded);
+            return stmt;
+        } else {
+            String sql = "INSERT INTO " + getPropTbl() + " (" + getFk() + ", name, value)" +
+                    " SELECT ?, ?, ?" +
+                    " WHERE NOT EXISTS (SELECT 1 FROM " + getPropTbl() +
+                    " WHERE " + getFk() + " = ? AND name = ? )";
+            PreparedStatement stmt = conn.get().prepareStatement(sql);
+            stmt.setLong(1, (Long) id);
+            stmt.setString(2, key);
+            stmt.setBytes(3, encoded);
+            stmt.setLong(4, (Long) id);
+            stmt.setString(5, key);
+            return stmt;
         }
     }
 
@@ -115,7 +130,7 @@ abstract class SqlElement implements Element {
         }
         T value = getProperty(key);
         String sql = "DELETE FROM " + getPropTbl() +
-                " WHERE " + getFk() + "=? AND key = ?";
+                " WHERE " + getFk() + "=? AND name = ?";
         try {
             PreparedStatement stmt = conn.get().prepareStatement(sql);
             stmt.setLong(1, (Long) id);

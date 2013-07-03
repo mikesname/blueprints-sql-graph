@@ -1,0 +1,65 @@
+Quick and dirty SQL/JDBC implementation for "Blueprints":https://github.com/tinkerpop/blueprints.
+
+Written solely for the sake of it.
+
+_Warning_: Current _mayor_ caveats:
+
+* _Munges the db schema - don't use this on a database not solely created for the purpose!!!_
+* Does no optimisations, like property caching, whatsoever
+* Probably leaks resources
+* Untested with databases other than H2 and Postgres
+* Uses Java object serialization to store property values, so data is completely unreadable
+* Uses an rather heavyweight connection manager added when trying (unsuccessfully) to get transaction tests to pass
+* Mmmn, probably lots more I haven't thought of...
+
+To try this out in the Gremlin repl you need to put some jars on the Gremlin-Groovy standalone classpath:
+
+* blueprints-sql-graph-0.1-SNAPSHOT.jar (this thing)
+* c3p0-0.9.1.2.jar (the connection pool)
+* Your database driver, i.e. postgresql-9.1-901.jdbc4.jar, or h2.jar
+
+If you're using a Gremlin distribute compiled from Github, these extra jars need to be copied to:
+
+bc. $GREMLIN_HOME/gremlin-groovy/target/gremlin-groovy-2.4.0-SNAPSHOT-standalone/lib/
+
+h3. Loading a graph in the Gremlin repl:
+
+h4. H2 in-memory database:
+
+bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
+gremlin> g = new SqlGraph("org.h2.Driver", "jdbc:h2:mem:test")
+gremlin> v1 = g.addVertex()
+gremlin> v1.addEdge("knows", g.addVertex())
+gremlin> g.commit()
+
+h4. Postgres:
+
+For server DBs you have to create an empty database. The graph can be loaded thusly:
+
+bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
+==> ...
+gremlin> g = new SqlGraph("org.postgresql.Driver", "jdbc:postgresql://localhost/blueprints", "blueprints", "changeme", false)
+==>sqlgraph [jdbc:postgresql://localhost/blueprints]
+gremlin> g.buildSchema()
+==>null
+
+The parameters for the constructor are:
+
+* The driver class (driver jar must be present on classpath)
+* The JDBC url
+* Database username
+* Database password
+* Whether or not to auto-create the schema if it can't find one already. This can be omitted for H2 because the
+default is false.
+
+h4. Mysql
+
+bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
+==> ...
+gremlin> g = new SqlGraph("com.mysql.jdbc.Driver", "jdbc:mysql://localhost/blueprints", "blueprints", "changeme", false)
+==>sqlgraph [jdbc:mysql://localhost/blueprints]
+gremlin> g.buildSchema()
+==>null
+
+
+

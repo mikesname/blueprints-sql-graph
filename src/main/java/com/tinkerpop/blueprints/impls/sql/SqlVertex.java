@@ -118,8 +118,8 @@ public class SqlVertex extends SqlElement implements Vertex {
         try {
             String sql = "INSERT INTO edges (vertex_out, vertex_in, label) VAlUES (?, ?, ?)";
             PreparedStatement stmt = conn.get().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-            stmt.setLong(1, (Long)id);
-            stmt.setLong(2, (Long)vertex.getId());
+            stmt.setLong(1, (Long) id);
+            stmt.setLong(2, (Long) vertex.getId());
             stmt.setString(3, label);
             stmt.execute();
             ResultSet resultSet = stmt.getGeneratedKeys();
@@ -165,8 +165,12 @@ public class SqlVertex extends SqlElement implements Vertex {
 
         String sql = "SELECT id, vertex_out, vertex_in, label FROM edges WHERE ";
         switch (direction) {
-            case IN: sql = sql + ("vertex_in=? " + labelClause); break;
-            case OUT: sql = sql + ("vertex_out=? " + labelClause); break;
+            case IN:
+                sql = sql + ("vertex_in=? " + labelClause);
+                break;
+            case OUT:
+                sql = sql + ("vertex_out=? " + labelClause);
+                break;
             default:
                 sql = sql + ("vertex_out=? " + labelClause + " UNION ALL " + sql + "vertex_in=? " + labelClause);
         }
@@ -176,14 +180,14 @@ public class SqlVertex extends SqlElement implements Vertex {
             stmt.setLong(1, (Long) id);
             int paramNum = 2;
             for (int i = paramNum; i < paramNum + labels.length; i++) {
-                stmt.setString(i, labels[i-paramNum]);
+                stmt.setString(i, labels[i - paramNum]);
             }
             paramNum += labels.length;
             if (direction.equals(Direction.BOTH)) {
-                stmt.setLong(paramNum, (Long)id);
+                stmt.setLong(paramNum, (Long) id);
                 paramNum++;
                 for (int i = paramNum; i < paramNum + labels.length; i++) {
-                    stmt.setString(i, labels[i-paramNum]);
+                    stmt.setString(i, labels[i - paramNum]);
                 }
             }
             return stmt;

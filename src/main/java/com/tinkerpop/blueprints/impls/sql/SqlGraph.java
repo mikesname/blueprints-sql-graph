@@ -21,14 +21,16 @@ public class SqlGraph implements TransactionalGraph {
 
     private final ComboPooledDataSource dataSource;
     private final boolean ownsDataSource;
+    private final boolean autoBuildSchema;
 
     public SqlGraph(ComboPooledDataSource dataSource) {
         this.dataSource = dataSource;
         this.ownsDataSource = false;
+        this.autoBuildSchema = false;
         checkIfNeedsSchema();
     }
 
-    public SqlGraph(String driverClass, String jdbcUrl, String user, String password) {
+    public SqlGraph(String driverClass, String jdbcUrl, String user, String password, boolean autoSchema) {
         try {
             // FIXME: Set system props to shut up C3P0 logging...
             Properties p = new Properties(System.getProperties());
@@ -44,14 +46,19 @@ public class SqlGraph implements TransactionalGraph {
             if (password != null)
                 dataSource.setPassword(password);
             ownsDataSource = true;
+            autoBuildSchema = autoSchema;
             checkIfNeedsSchema();
         } catch (PropertyVetoException e) {
             throw new RuntimeException(e);
         }
     }
 
+    public SqlGraph(String driverClass, String jdbcUrl, boolean autoSchema) {
+        this(driverClass, jdbcUrl, null, null, autoSchema);
+    }
+
     public SqlGraph(String driverClass, String jdbcUrl) {
-        this(driverClass, jdbcUrl, null, null);
+        this(driverClass, jdbcUrl, null, null, driverClass.contentEquals("org.h2.Driver"));
     }
 
     protected final ThreadLocal<Connection> conn = new ThreadLocal<Connection>() {
@@ -125,7 +132,7 @@ public class SqlGraph implements TransactionalGraph {
     @Override
     public Vertex addVertex(Object o) {
         try {
-            String sql = "INSERT INTO vertices DEFAULT VALUES";
+            String sql = "INSERT INTO vertices (id) VALUES (DEFAULT)";
             PreparedStatement stmt = conn.get().prepareStatement(sql,
                     Statement.RETURN_GENERATED_KEYS);
             stmt.execute();
@@ -189,7 +196,7 @@ public class SqlGraph implements TransactionalGraph {
     @Override
     public Iterable<Vertex> getVertices(String key, Object value) {
         byte[] encoded = Encoder.encodeValue(value);
-        String sql = "SELECT vertex_id FROM vertex_properties WHERE key = ? AND value = ?";
+        String sql = "SELECT vertex_id FROM vertex_properties WHERE name = ? AND value = ?";
         try {
             PreparedStatement stmt = conn.get().prepareStatement(sql,
                     ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
@@ -262,7 +269,7 @@ public class SqlGraph implements TransactionalGraph {
         try {
             String sql = "SELECT DISTINCT e.id, e.vertex_out, e.vertex_in, e.label" +
                     " FROM edges e, edge_properties ep" +
-                    " WHERE e.id = ep.edge_id AND key = ? AND value = ?";
+                    " WHERE e.id = ep.edge_id AND name = ? AND value = ?";
             PreparedStatement stmt = conn.get().prepareStatement(sql,
                     ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
             stmt.setString(1, key);
@@ -356,25 +363,45 @@ public class SqlGraph implements TransactionalGraph {
         } catch (SQLException e) {
             if (e.getSQLState().startsWith("42")) { // Base table not found...
                 try {
-                    buildSchema();
+                    if (autoBuildSchema)
+                        buildSchema();
+                    else
+                        System.err.println("Warning: no schema found. Use graph.buildSchema() if you really" +
+                                " want to use this database.");
                 } catch (SQLException e1) {
                     throw new SqlGraphException(e);
                 } catch (IOException e1) {
                     throw new RuntimeException(e);
                 }
             }
+        } finally {
+            try {
+                conn.get().commit();
+            } catch (SQLException e) {
+                throw new SqlGraphException(e);
+            }
         }
 
     }
 
     public void buildSchema() throws SQLException, IOException {
-        buildSchema(conn.get());
-        conn.get().commit();
+        String resource = dataSource.getJdbcUrl().contains("mysql") ?
+                "mysql-schema.sql" : "schema.sql";
+        buildSchema(conn.get(), resource);
     }
 
-    public static void buildSchema(Connection conn) throws SQLException, IOException {
+    /**
+     * Hacks needed for SQL compat! Urgh...
+     * @return
+     */
+    public String getJdbcUrl() {
+        return dataSource.getJdbcUrl();
+    }
+
+    public static void buildSchema(Connection conn, String schemaResource) throws SQLException, IOException {
+
         InputStream stream = SqlGraph.class.getClassLoader()
-                .getResourceAsStream("schema.sql");
+                .getResourceAsStream(schemaResource);
         try {
             loadSqlFromInputStream(conn, stream);
         } finally {

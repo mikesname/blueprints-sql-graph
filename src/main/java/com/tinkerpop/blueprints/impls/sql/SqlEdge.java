@@ -30,9 +30,12 @@ public class SqlEdge extends SqlElement implements Edge {
     @Override
     public Vertex getVertex(Direction direction) throws IllegalArgumentException {
         switch (direction) {
-            case IN: return new SqlVertex(conn, graph, vertexIn);
-            case OUT: return new SqlVertex(conn, graph, vertexOut);
-            default: throw new IllegalArgumentException("Direction must be either IN or OUT, not BOTH");
+            case IN:
+                return new SqlVertex(conn, graph, vertexIn);
+            case OUT:
+                return new SqlVertex(conn, graph, vertexOut);
+            default:
+                throw new IllegalArgumentException("Direction must be either IN or OUT, not BOTH");
         }
     }
 
