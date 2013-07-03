@@ -1,0 +1,64 @@
+nb-configuration.xml
+nbactions.xml
+*.class
+*.java.orig
+*.xml.orig
+*.~lock.*#
+
+# Package Files #
+*.jar
+*.war
+*.ear
+
+*.pydevproject
+.project
+.metadata
+bin/**
+tmp/**
+tmp/**/*
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.classpath
+.settings/
+.loadpath
+target
+
+# External tool builders
+.externalToolBuilders/
+
+# Locally stored "Eclipse launch configurations"
+*.launch
+
+# CDT-specific
+.cproject
+
+# PDT-specific
+.buildpath
+
+# Ignore target
+**/target/*
+
+Intellij
+*iml
+.idea
+
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+ehthumbs.db
+Thumbs.db
+
+
+neo4j-community-1.9*
+
+# Ignore test data folder
+testdata
