@@ -49,8 +49,8 @@ The parameters for the constructor are:
 * The JDBC url
 * Database username
 * Database password
-* Whether or not to auto-create the schema if it can't find one already. This can be omitted for H2 because the
-default is false.
+* Whether or not to auto-create the schema if it can't find one already. This can be omitted for H2
+  because the default is false.
 
 h4. Mysql
 
@@ -62,4 +62,12 @@ gremlin> g.buildSchema()
 ==>null
 
 
+h3. Potential optimisations.
 
+Currently there are _no_ optimisations at all with regard to making retrieval smarter and faster,
+but some could be interesting to implement:
+
+* Caching of properties
+* Deferred insertion of properties until they can be batch inserted
+* Better property serialization
+* Smart stuff with SQL generation, or something
