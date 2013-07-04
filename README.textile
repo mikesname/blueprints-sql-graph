@@ -4,7 +4,7 @@ Written solely for the sake of it.
 
 _Warning_: Current _mayor_ caveats:
 
-* _Munges the db schema (automatically if certain parameters are given) - don't use this on a database not solely created for the purpose!!!
+* _Munges the db schema (automatically if certain parameters are given)_ - don't use this on a database not solely created for the purpose!!!
 * Does no optimisations, like property caching, whatsoever
 * Probably leaks resources
 * Untested with databases other than H2 and Postgres
