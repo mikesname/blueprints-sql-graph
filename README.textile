@@ -18,7 +18,7 @@ To try this out in the Gremlin repl you need to put some jars on the Gremlin-Gro
 * c3p0-0.9.1.2.jar (the connection pool)
 * Your database driver, i.e. postgresql-9.1-901.jdbc4.jar, or h2.jar
 
-If you're using a Gremlin distribute compiled from Github, these extra jars need to be copied to:
+If you're using a Gremlin distribution compiled from Github, these extra jars need to be copied to:
 
 bc. $GREMLIN_HOME/gremlin-groovy/target/gremlin-groovy-2.4.0-SNAPSHOT-standalone/lib/
 
@@ -34,7 +34,7 @@ gremlin> g.commit()
 
 h4. Postgres:
 
-For server DBs you have to create an empty database. The graph can be loaded thusly:
+For server DBs you *first* have to create an empty database, with a username/password. The graph can be loaded thusly:
 
 bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
 ==> ...
@@ -50,7 +50,8 @@ The parameters for the constructor are:
 * Database username
 * Database password
 * Whether or not to auto-create the schema if it can't find one already. This can be omitted for H2
-  because the default is false.
+  because the default is true (assumes H2 DBs are throwaway). If 'false' is given, the schema can be
+  created with the @graph.buildSchema()@ function.
 
 h4. Mysql
 
