@@ -3,7 +3,7 @@ package com.tinkerpop.blueprints.impls.sql;
 import com.tinkerpop.blueprints.Direction;
 import com.tinkerpop.blueprints.Edge;
 import com.tinkerpop.blueprints.Vertex;
-import com.tinkerpop.blueprints.util.StringFactory;
+import com.tinkerpop.blueprints.util.ExceptionFactory;
 
 import java.sql.Connection;
 
@@ -35,21 +35,13 @@ public class SqlEdge extends SqlElement implements Edge {
             case OUT:
                 return new SqlVertex(conn, graph, vertexOut);
             default:
-                throw new IllegalArgumentException("Direction must be either IN or OUT, not BOTH");
+                throw ExceptionFactory.bothIsNotSupported();
         }
     }
 
     @Override
     public String toString() {
         return getClass().getSimpleName() + "[" + id + " (" + label + ")]";
-    }
-
-    @Override
-    public void setProperty(String key, Object value) {
-        if (key != null && key.equals(StringFactory.LABEL)) {
-            throw new IllegalArgumentException("Property key '" + StringFactory.LABEL + "' is reserved.");
-        }
-        super.setProperty(key, value);
     }
 
     @Override

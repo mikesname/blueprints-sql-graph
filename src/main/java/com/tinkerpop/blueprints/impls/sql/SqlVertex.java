@@ -62,10 +62,8 @@ public class SqlVertex extends SqlElement implements Vertex {
                 // using a HashSet.
                 List<Vertex> vertices = new ArrayList<Vertex>();
                 while (resultSet.next()) {
-                    Long eid = resultSet.getLong(1);
                     Long outV = resultSet.getLong(2);
                     Long inV = resultSet.getLong(3);
-                    String label = resultSet.getString(4);
                     switch (direction) {
                         case IN:
                             vertices.add(new SqlVertex(conn, graph, outV));
@@ -90,8 +88,7 @@ public class SqlVertex extends SqlElement implements Vertex {
                         }
                     }
                 }
-                if (direction.equals(Direction.BOTH))
-                    System.out.println(vertices);
+
                 return vertices;
             } finally {
                 resultSet.close();
