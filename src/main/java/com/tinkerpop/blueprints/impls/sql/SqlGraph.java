@@ -1,17 +1,21 @@
 package com.tinkerpop.blueprints.impls.sql;
 
+import java.beans.BeanInfo;
+import java.beans.Introspector;
+import java.beans.PropertyDescriptor;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
-import java.util.NoSuchElementException;
+import java.util.Map;
 import java.util.WeakHashMap;
 
 import javax.sql.DataSource;
@@ -19,12 +23,13 @@ import javax.sql.DataSource;
 import com.tinkerpop.blueprints.CloseableIterable;
 import com.tinkerpop.blueprints.Edge;
 import com.tinkerpop.blueprints.Features;
-import com.tinkerpop.blueprints.GraphQuery;
 import com.tinkerpop.blueprints.ThreadedTransactionalGraph;
 import com.tinkerpop.blueprints.TransactionalGraph;
 import com.tinkerpop.blueprints.Vertex;
 
 import org.apache.commons.configuration.Configuration;
+import org.apache.commons.configuration.ConfigurationConverter;
+import org.apache.commons.configuration.MapConfiguration;
 
 /**
  * @author Mike Bryant (http://github.com/mikesname)
@@ -78,13 +83,65 @@ public final class SqlGraph implements ThreadedTransactionalGraph {
 
     private final WeakHashMap<Long, WeakReference<SqlVertex>> vertexCache = new WeakHashMap<>();
 
+    /**
+     * Instantiates a new SQL graph configured from the provided configuration object.
+     * The following properties are supported:
+     * <ul>
+     * <li><code>sql.datasource.class</code> - the name of the datasource class from some JDBC driver on the
+     * classpath</li>
+     * <li><code>sql.datasource.*</code> - any properties of the datasource can be passed using this prefix.
+     * E.g. <code>sql.datasource.portNumber</code>, <code>sql.datasource.serverName</code>, etc. See the documentation
+     * of the datasource for the list of available properties.</li>
+     * <li><code>sql.verticesTable</code> - the name of the vertices table. Defaults to "vertices".</li>
+     * <li><code>sql.edgesTable</code> - the name of the edges table. Defaults to "edges".</li>
+     * <li><code>sql.vertexPropertiesTable</code> - the name of the table for vertex properties. Defaults to
+     * "vertex_properties".</li>
+     * <li><code>sql.edgePropertiesTable</code> - the name of the table for edge properties. Defaults to
+     * "edge_properties".</li>
+     * </ul>
+     *
+     * @param configuration the configuration to use
+     *
+     * @throws Exception
+     */
     public SqlGraph(Configuration configuration) throws Exception {
-        String dsClass = configuration.getString("sql.datasourceClass");
+        String dsClass = configuration.getString("sql.datasource.class");
         dataSource = (DataSource) Class.forName(dsClass).newInstance();
+        setupDataSource(dataSource, configuration);
         verticesTableName = configuration.getString("sql.verticesTable", "vertices");
         edgesTableName = configuration.getString("sql.edgesTable", "edges");
         vertexPropertiesTableName = configuration.getString("sql.vertexPropertiesTable", "vertex_properties");
         edgePropertiesTableName = configuration.getString("sql.edgePropertiesTable", "edge_properties");
+    }
+
+    public SqlGraph(Map<String, Object> configuration) throws Exception {
+        this(new MapConfiguration(configuration));
+    }
+
+    private void setupDataSource(DataSource dataSource, Configuration configuration) throws Exception {
+        BeanInfo beanInfo = Introspector.getBeanInfo(dataSource.getClass());
+        PropertyDescriptor[] properties = beanInfo.getPropertyDescriptors();
+        Map<String, PropertyDescriptor> propsByName = new HashMap<>();
+        for (PropertyDescriptor p : properties) {
+            propsByName.put(p.getName(), p);
+        }
+
+        Iterator it = configuration.getKeys("sql.datasource");
+        while (it.hasNext()) {
+            String key = (String) it.next();
+            String property = key.substring("sql.datasource.".length());
+
+            PropertyDescriptor d = propsByName.get(property);
+
+            if (d == null) {
+                continue;
+            }
+
+            Method write = d.getWriteMethod();
+            if (write != null) {
+                write.invoke(dataSource, configuration.getProperty(key));
+            }
+        }
     }
 
     public SqlGraph(DataSource dataSource) {
@@ -446,6 +503,7 @@ public final class SqlGraph implements ThreadedTransactionalGraph {
             return null;
         }
     }
+
     private SqlVertex cache(SqlVertex v) {
         if (v != null) {
             vertexCache.put(v.getId(), new WeakReference<>(v));
