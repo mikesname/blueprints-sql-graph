@@ -103,4 +103,40 @@ public final class SqlEdge extends SqlElement implements Edge {
     public String getLabel() {
         return label;
     }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+
+        SqlEdge sqlEdge = (SqlEdge) o;
+
+        if (inVertexId != sqlEdge.inVertexId) {
+            return false;
+        }
+        if (outVertexId != sqlEdge.outVertexId) {
+            return false;
+        }
+        if (!label.equals(sqlEdge.label)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    @Override
+    public int hashCode() {
+        int result = super.hashCode();
+        result = 31 * result + (int) (inVertexId ^ (inVertexId >>> 32));
+        result = 31 * result + (int) (outVertexId ^ (outVertexId >>> 32));
+        result = 31 * result + label.hashCode();
+        return result;
+    }
 }
