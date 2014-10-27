@@ -2,11 +2,10 @@ Quick and dirty SQL/JDBC implementation for "Blueprints":https://github.com/tink
 
 Written solely for the sake of it.
 
-_Warning_: Current _mayor_ caveats:
+_Warning_: Current caveats:
 
-* _Munges the db schema (automatically if certain parameters are given)_ - don't use this on a database not solely created for the purpose!!!
 * Does no optimisations, like property caching, whatsoever
-* Probably leaks resources
+* Leaks resources unless you cast the _Iterable_s to _CloseableIterable_s and close them explicitly.
 * Untested with databases other than H2 and Postgres
 * Only supports primitive types and strings as property values
 * Mmmn, probably lots more I haven't thought of...
