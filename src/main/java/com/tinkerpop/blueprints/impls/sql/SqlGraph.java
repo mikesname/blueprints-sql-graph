@@ -497,8 +497,8 @@ public final class SqlGraph implements ThreadedTransactionalGraph {
             } catch (NumberFormatException e) {
                 return null;
             }
-        } else if (id instanceof Long) {
-            return (Long) id;
+        } else if (id instanceof Number) {
+            return ((Number) id).longValue();
         } else {
             return null;
         }
