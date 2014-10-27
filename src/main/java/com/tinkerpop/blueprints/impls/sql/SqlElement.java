@@ -1,52 +1,57 @@
 package com.tinkerpop.blueprints.impls.sql;
 
-import com.tinkerpop.blueprints.Element;
-import com.tinkerpop.blueprints.impls.sql.utils.Encoder;
-import com.tinkerpop.blueprints.util.ElementHelper;
-
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+
+import com.tinkerpop.blueprints.Element;
 
 /**
  * @author Mike Bryant (http://github.com/mikesname)
+ * @author Lukas Krejci
+ * @since 1.0
  */
 abstract class SqlElement implements Element {
 
-    protected final ThreadLocal<Connection> conn;
-    protected final Object id;
     protected final SqlGraph graph;
+    private final Long id;
 
-    SqlElement(ThreadLocal<Connection> conn, SqlGraph graph, Object id) {
-        this.id = (Long) id;
-        this.conn = conn;
-        this.graph = graph;
-    }
-
-    @Override
-    public <T> T getProperty(String key) {
-        if (key == null || key.isEmpty()) {
-            throw new IllegalArgumentException("Property key cannot be null (or empty)");
+    protected SqlElement(SqlGraph graph, Long id) {
+        if (id == null) {
+            throw new IllegalArgumentException("id can't be null");
         }
 
-        try {
-            String sql = "SELECT value FROM " + getPropTbl()
-                    + " WHERE " + getFk() + " = ? AND name = ?";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
+        this.graph = graph;
+        this.id = id;
+    }
+
+    protected abstract String getPropertiesTableName();
+
+    protected abstract String getPropertyTableElementIdName();
+
+    protected abstract List<String> getDisallowedPropertyNames();
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T> T getProperty(String key) {
+        String sql = "SELECT string_value, numeric_value, value_type FROM " + getPropertiesTableName() + " WHERE " +
+            getPropertyTableElementIdName() + " = ? AND name = ?";
+
+        try (PreparedStatement stmt = graph.getConnection().prepareStatement(sql)) {
+            stmt.setLong(1, id);
             stmt.setString(2, key);
-            ResultSet resultSet = stmt.executeQuery();
-            try {
-                if (resultSet.next()) {
-                    return (T) Encoder.decodeValue(resultSet.getBytes(1));
-                } else {
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
                     return null;
                 }
-            } finally {
-                resultSet.close();
+
+                int valueTypeInt = rs.getInt(3);
+                ValueType valueType = ValueType.values()[valueTypeInt];
+
+                return (T) valueType.convertFromDBType(rs.getObject(valueType.isNumeric() ? 2 : 1));
             }
         } catch (SQLException e) {
             throw new SqlGraphException(e);
@@ -55,16 +60,21 @@ abstract class SqlElement implements Element {
 
     @Override
     public Set<String> getPropertyKeys() {
-        try {
-            Set<String> keys = new HashSet<String>();
-            String sql = "SELECT name FROM " + getPropTbl() + " WHERE " + getFk() + " = ?";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
-            ResultSet resultSet = stmt.executeQuery();
-            while (resultSet.next()) {
-                keys.add(resultSet.getString(1));
+        String sql =
+            "SELECT name FROM " + getPropertiesTableName() + " WHERE " + getPropertyTableElementIdName() + " = ?";
+
+        try (PreparedStatement stmt = graph.getConnection().prepareStatement(sql)) {
+            stmt.setLong(1, id);
+
+            Set<String> ret = new HashSet<>();
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    ret.add(rs.getString(1));
+                }
             }
-            return keys;
+
+            return ret;
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
@@ -72,70 +82,62 @@ abstract class SqlElement implements Element {
 
     @Override
     public void setProperty(String key, Object value) {
-        ElementHelper.validateProperty(this, key, value);
+        if (key == null || key.isEmpty()) {
+            throw new IllegalArgumentException("empty key");
+        }
 
-        byte[] encoded = Encoder.encodeValue(value);
+        if (getDisallowedPropertyNames().contains(key)) {
+            throw new IllegalArgumentException("disallowed property name");
+        }
 
-        try {
-            // Ugh! 'Upsert' is complicated!
-            // http://stackoverflow.com/a/6527838/285374
-            // http://stackoverflow.com/a/8702291/285374
-            // Update that will noop if the key doesn't exist...
-            String update = "UPDATE " + getPropTbl() + " SET value = ?" +
-                    " WHERE " + getFk() + "=? AND name = ?";
-            PreparedStatement updateStmt = conn.get().prepareStatement(update);
-            updateStmt.setBytes(1, encoded);
-            updateStmt.setLong(2, (Long) id);
-            updateStmt.setString(3, key);
-            updateStmt.execute();
+        if (value == null) {
+            throw new IllegalArgumentException("null value not allowed");
+        }
 
-            // Insert that will noop if the key *does* exist
-            PreparedStatement insertStmt = getNoopInsert(key, encoded);
-            insertStmt.execute();
+        ValueType valueType = ValueType.of(value, true);
+        if (valueType == null) {
+            throw new IllegalArgumentException(
+                "Unsupported value type " + value.getClass() + ". Only primitive types and string are supported.");
+        }
+
+        String sql = "UPDATE " + getPropertiesTableName() + " SET " +
+            (valueType.isNumeric() ? "numeric_value" : "string_value") + " = ?, value_type = ? WHERE " +
+            getPropertyTableElementIdName() + " = ? AND name = ?";
+
+        try (PreparedStatement stmt = graph.getConnection().prepareStatement(sql)) {
+            stmt.setObject(1, value);
+            stmt.setInt(2, valueType.ordinal());
+            stmt.setLong(3, id);
+            stmt.setString(4, key);
+
+            if (stmt.executeUpdate() == 0) {
+                sql = "INSERT INTO " + getPropertiesTableName() + " (" + getPropertyTableElementIdName() +
+                    ", name, string_value, numeric_value, value_type) VALUES (?, ?, ?, ?, ?)";
+
+                try (PreparedStatement stmt2 = graph.getConnection().prepareStatement(sql)) {
+                    stmt2.setLong(1, id);
+                    stmt2.setString(2, key);
+                    stmt2.setObject(3, valueType.isNumeric() ? null : value);
+                    stmt2.setObject(4, valueType.isNumeric() ? value : null);
+                    stmt2.setInt(5, valueType.ordinal());
+
+                    stmt2.executeUpdate();
+                }
+            }
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
     }
 
-    private PreparedStatement getNoopInsert(String key, byte[] encoded)
-            throws SQLException {
-        // Sigh... can't find a no-op insert syntax that works for
-        // both Postgres and Mysql...
-        if (graph.getJdbcUrl().contains("mysql")) {
-            String sql = "INSERT IGNORE INTO " + getPropTbl() + " (" + getFk() + ", name, value) VALUES (?,?,?)";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
-            stmt.setString(2, key);
-            stmt.setBytes(3, encoded);
-            return stmt;
-        } else {
-            String sql = "INSERT INTO " + getPropTbl() + " (" + getFk() + ", name, value)" +
-                    " SELECT ?, ?, ?" +
-                    " WHERE NOT EXISTS (SELECT 1 FROM " + getPropTbl() +
-                    " WHERE " + getFk() + " = ? AND name = ? )";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
-            stmt.setString(2, key);
-            stmt.setBytes(3, encoded);
-            stmt.setLong(4, (Long) id);
-            stmt.setString(5, key);
-            return stmt;
-        }
-    }
-
     @Override
     public <T> T removeProperty(String key) {
-        if (key == null || key.isEmpty()) {
-            throw new IllegalArgumentException("Property key cannot be null");
-        }
         T value = getProperty(key);
-        String sql = "DELETE FROM " + getPropTbl() +
-                " WHERE " + getFk() + "=? AND name = ?";
-        try {
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
+
+        String sql = "DELETE FROM " + getPropertiesTableName() + " WHERE " + getPropertyTableElementIdName() + " = ? AND name = ?";
+        try (PreparedStatement stmt = graph.getConnection().prepareStatement(sql)) {
+            stmt.setLong(1, id);
             stmt.setString(2, key);
-            stmt.execute();
+            stmt.executeUpdate();
             return value;
         } catch (SQLException e) {
             throw new SqlGraphException(e);
@@ -143,33 +145,27 @@ abstract class SqlElement implements Element {
     }
 
     @Override
-    public void remove() {
-        // CASCADE will remove the properties and edges.
-        try {
-            String sql = "DELETE FROM " + getTbl() + " WHERE id = ?";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
-            stmt.execute();
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        }
-    }
-
-    @Override
-    public String toString() {
-        return getClass().getSimpleName() + "[" + id + "]";
-    }
-
-    @Override
-    public Object getId() {
+    public Long getId() {
         return id;
     }
 
-    abstract String getTbl();
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
 
-    abstract String getPropTbl();
+        SqlElement sqlVertex = (SqlElement) o;
 
-    abstract String getFk();
+        if (!id.equals(sqlVertex.id)) {
+            return false;
+        }
+
+        return true;
+    }
 
     @Override
     public int hashCode() {
@@ -177,11 +173,11 @@ abstract class SqlElement implements Element {
     }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        SqlElement pgElement = (SqlElement) o;
-        if (!id.equals(pgElement.id)) return false;
-        return true;
+    public String toString() {
+        final StringBuilder sb = new StringBuilder(getClass().getSimpleName());
+        sb.append("[id=").append(id);
+        sb.append(']');
+        return sb.toString();
     }
+
 }

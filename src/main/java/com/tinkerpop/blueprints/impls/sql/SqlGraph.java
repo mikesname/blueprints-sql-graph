@@ -1,107 +1,50 @@
 package com.tinkerpop.blueprints.impls.sql;
 
-import com.mchange.v2.c3p0.ComboPooledDataSource;
-import com.tinkerpop.blueprints.*;
-import com.tinkerpop.blueprints.impls.sql.utils.Encoder;
-import com.tinkerpop.blueprints.util.DefaultGraphQuery;
-import com.tinkerpop.blueprints.util.ExceptionFactory;
-
-import java.beans.PropertyVetoException;
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.sql.*;
-import java.util.Properties;
+import java.lang.ref.WeakReference;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
+import java.util.WeakHashMap;
+
+import javax.sql.DataSource;
+
+import com.tinkerpop.blueprints.CloseableIterable;
+import com.tinkerpop.blueprints.Edge;
+import com.tinkerpop.blueprints.Features;
+import com.tinkerpop.blueprints.GraphQuery;
+import com.tinkerpop.blueprints.ThreadedTransactionalGraph;
+import com.tinkerpop.blueprints.TransactionalGraph;
+import com.tinkerpop.blueprints.Vertex;
+
+import org.apache.commons.configuration.Configuration;
 
 /**
  * @author Mike Bryant (http://github.com/mikesname)
+ * @author Lukas Krejci
+ * @since 1.0
  */
-public class SqlGraph implements TransactionalGraph {
-
-    private final ComboPooledDataSource dataSource;
-    private final boolean ownsDataSource;
-    private final boolean autoBuildSchema;
-
-    public SqlGraph(ComboPooledDataSource dataSource) {
-        this.dataSource = dataSource;
-        this.ownsDataSource = false;
-        this.autoBuildSchema = false;
-        checkIfNeedsSchema();
-    }
-
-    public SqlGraph(String driverClass, String jdbcUrl, String user, String password, boolean autoSchema) {
-        try {
-            // FIXME: Set system props to shut up C3P0 logging...
-            Properties p = new Properties(System.getProperties());
-            p.put("com.mchange.v2.log.MLog", "com.mchange.v2.log.FallbackMLog");
-            p.put("com.mchange.v2.log.FallbackMLog.DEFAULT_CUTOFF_LEVEL", "OFF");
-            System.setProperties(p);
-
-            dataSource = new ComboPooledDataSource();
-            dataSource.setDriverClass(driverClass);
-            dataSource.setJdbcUrl(jdbcUrl);
-            if (user != null)
-                dataSource.setUser(user);
-            if (password != null)
-                dataSource.setPassword(password);
-            ownsDataSource = true;
-            autoBuildSchema = autoSchema;
-            checkIfNeedsSchema();
-        } catch (PropertyVetoException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public SqlGraph(String driverClass, String jdbcUrl, boolean autoSchema) {
-        this(driverClass, jdbcUrl, null, null, autoSchema);
-    }
-
-    public SqlGraph(String driverClass, String jdbcUrl) {
-        this(driverClass, jdbcUrl, null, null, driverClass.contentEquals("org.h2.Driver"));
-    }
-
-    protected final ThreadLocal<Connection> conn = new ThreadLocal<Connection>() {
-        protected Connection initialValue() {
-            try {
-                Connection conn = dataSource.getConnection();
-                conn.setAutoCommit(false);
-                conn.setTransactionIsolation(
-                        Connection.TRANSACTION_READ_UNCOMMITTED);
-                return conn;
-            } catch (SQLException e) {
-                throw new SqlGraphException(e);
-            }
-        }
-
-        @Override
-        public Connection get() {
-            Connection conn = super.get();
-            try {
-                if (conn.isClosed()) {
-                    return initialValue();
-                } else {
-                    return conn;
-                }
-            } catch (SQLException e) {
-                throw new SqlGraphException(e);
-            }
-        }
-    };
-
+public final class SqlGraph implements ThreadedTransactionalGraph {
     private static final Features FEATURES = new Features();
 
     static {
-        FEATURES.supportsSerializableObjectProperty = true;
+        FEATURES.supportsSerializableObjectProperty = false;
         FEATURES.supportsBooleanProperty = true;
         FEATURES.supportsDoubleProperty = true;
         FEATURES.supportsFloatProperty = true;
         FEATURES.supportsIntegerProperty = true;
-        FEATURES.supportsPrimitiveArrayProperty = true;
-        FEATURES.supportsUniformListProperty = true;
-        FEATURES.supportsMixedListProperty = true;
+        FEATURES.supportsPrimitiveArrayProperty = false;
+        FEATURES.supportsUniformListProperty = false;
+        FEATURES.supportsMixedListProperty = false;
         FEATURES.supportsLongProperty = true;
-        FEATURES.supportsMapProperty = true;
+        FEATURES.supportsMapProperty = false;
         FEATURES.supportsStringProperty = true;
 
         FEATURES.supportsDuplicateEdges = true;
@@ -118,190 +61,120 @@ public class SqlGraph implements TransactionalGraph {
         FEATURES.supportsKeyIndices = false;
         FEATURES.supportsVertexKeyIndex = false;
         FEATURES.supportsEdgeKeyIndex = false;
-        FEATURES.supportsEdgeRetrieval = false;
+        FEATURES.supportsEdgeRetrieval = true;
         FEATURES.supportsVertexProperties = true;
         FEATURES.supportsEdgeProperties = true;
-        FEATURES.supportsThreadedTransactions = false;
+        FEATURES.supportsThreadedTransactions = true;
+        FEATURES.supportsThreadIsolatedTransactions = false;
     }
 
-    @Override
-    public Features getFeatures() {
-        return FEATURES;
+    private final DataSource dataSource;
+    private volatile Connection connection;
+    private volatile Statements statements;
+    private final String verticesTableName;
+    private final String edgesTableName;
+    private final String vertexPropertiesTableName;
+    private final String edgePropertiesTableName;
+
+    private final WeakHashMap<Long, WeakReference<SqlVertex>> vertexCache = new WeakHashMap<>();
+
+    public SqlGraph(Configuration configuration) throws Exception {
+        String dsClass = configuration.getString("sql.datasourceClass");
+        dataSource = (DataSource) Class.forName(dsClass).newInstance();
+        verticesTableName = configuration.getString("sql.verticesTable", "vertices");
+        edgesTableName = configuration.getString("sql.edgesTable", "edges");
+        vertexPropertiesTableName = configuration.getString("sql.vertexPropertiesTable", "vertex_properties");
+        edgePropertiesTableName = configuration.getString("sql.edgePropertiesTable", "edge_properties");
     }
 
-    @Override
-    public Vertex addVertex(Object o) {
-        try {
-            String sql = "INSERT INTO vertices (id) VALUES (DEFAULT)";
-            PreparedStatement stmt = conn.get().prepareStatement(sql,
-                    Statement.RETURN_GENERATED_KEYS);
-            stmt.execute();
-            ResultSet resultSet = stmt.getGeneratedKeys();
-            try {
-                if (resultSet.next()) {
-                    return new SqlVertex(conn, this, resultSet.getLong(1));
-                }
-                throw new RuntimeException("Unable to get id of inserted vertex");
-            } finally {
-                resultSet.close();
+    public SqlGraph(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    private SqlGraph(DataSource dataSource, Connection connection) {
+        this.dataSource = dataSource;
+        this.connection = connection;
+        verticesTableName = "vertices";
+        edgesTableName = "edges";
+        vertexPropertiesTableName = "vertex_properties";
+        edgePropertiesTableName = "edge_properties";
+    }
+
+    public void createSchemaIfNeeded() throws SQLException, IOException {
+        ensureConnection();
+
+        try (Statement st = connection.createStatement()) {
+            st.execute("SELECT 1 FROM " + getVerticesTableName());
+            return;
+        } catch (SQLException ignored) {
+            //good, the schema doesn't exist. Let's continue
+        }
+
+        String dbName = connection.getMetaData().getDatabaseProductName();
+        String script = dbName + "-schema.sql";
+        InputStream schemaStream = getClass().getClassLoader().getResourceAsStream(script);
+        if (schemaStream == null) {
+            schemaStream = getClass().getClassLoader().getResourceAsStream("schema.sql");
+        }
+
+        if (schemaStream == null) {
+            throw new AssertionError("Could not load the schema creation script.");
+        }
+
+        String contents = null;
+        try (InputStreamReader rdr = new InputStreamReader(schemaStream)) {
+            StringBuilder bld = new StringBuilder();
+            char[] buffer = new char[512];
+
+            int cnt;
+            while ((cnt = rdr.read(buffer)) != -1) {
+                bld.append(buffer, 0, cnt);
             }
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
+
+            contents = bld.toString();
         }
-    }
 
-    @Override
-    public Vertex getVertex(Object id) {
-        Long lid = getLongId(id);
-        if (lid == null)
-            return null;
+        contents = contents.replace("%VERTICES%", verticesTableName);
+        contents = contents.replace("%VERTEX_PROPERTIES%", vertexPropertiesTableName);
+        contents = contents.replace("%EDGES%", edgesTableName);
+        contents = contents.replace("%EDGE_PROPERTIES%", edgePropertiesTableName);
 
-        try {
-            String sql = "SELECT id FROM vertices WHERE id = ?";
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, lid);
-            ResultSet resultSet = stmt.executeQuery();
-            try {
-                if (resultSet.next()) {
-                    Long oid = resultSet.getLong(1);
-                    return new SqlVertex(conn, this, oid);
-                } else {
-                    return null;
-                }
-            } finally {
-                resultSet.close();
+        String[] inst = contents.split(";");
+        Statement st = connection.createStatement();
+
+        for (int i = 0; i < inst.length; i++) {
+            // we ensure that there is no spaces before or after the request string
+            // in order to not execute empty statements
+            if (!inst[i].trim().equals("")) {
+                st.executeUpdate(inst[i]);
             }
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
         }
     }
 
     @Override
-    public void removeVertex(Vertex vertex) {
-        vertex.remove();
-    }
-
-    @Override
-    public CloseableIterable<Vertex> getVertices() {
+    public TransactionalGraph newTransaction() {
         try {
-            String sql = "SELECT * FROM vertices";
-            Statement stmt = conn.get().createStatement(
-                    ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
-            return new SqlVertexIterable<Vertex>(conn, this, stmt.executeQuery(sql));
+            Connection conn = newConnection();
+            return new SqlGraph(dataSource, conn);
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
     }
 
     @Override
-    public Iterable<Vertex> getVertices(String key, Object value) {
-        byte[] encoded = Encoder.encodeValue(value);
-        String sql = "SELECT vertex_id FROM vertex_properties WHERE name = ? AND value = ?";
-        try {
-            PreparedStatement stmt = conn.get().prepareStatement(sql,
-                    ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
-            stmt.setString(1, key);
-            stmt.setBytes(2, encoded);
-            ResultSet resultSet = stmt.executeQuery();
-            return new SqlVertexIterable<SqlVertex>(conn, this, resultSet);
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
+    public void stopTransaction(Conclusion conclusion) {
+        if (conclusion == Conclusion.SUCCESS) {
+            commit();
+        } else {
+            rollback();
         }
-    }
-
-    @Override
-    public Edge addEdge(Object o, Vertex out, Vertex in, String label) {
-        return out.addEdge(label, in);
-    }
-
-    @Override
-    public Edge getEdge(Object id) {
-        if (null == id)
-            throw ExceptionFactory.edgeIdCanNotBeNull();
-
-        Long lid = getLongId(id);
-        if (lid == null)
-            return null;
-
-        String sql = "SELECT id, vertex_out, vertex_in, label FROM edges WHERE id = ?";
-        try {
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, lid);
-            ResultSet resultSet = stmt.executeQuery();
-            try {
-                if (resultSet.next()) {
-                    return new SqlEdge(conn, this,
-                            resultSet.getObject(1),
-                            resultSet.getObject(2),
-                            resultSet.getObject(3),
-                            resultSet.getString(4));
-                } else {
-                    return null;
-                }
-            } finally {
-                resultSet.close();
-            }
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        }
-    }
-
-    @Override
-    public void removeEdge(Edge edge) {
-        edge.remove();
-    }
-
-    @Override
-    public CloseableIterable<Edge> getEdges() {
-        try {
-            String sql = "SELECT * FROM edges";
-            Statement stmt = conn.get().createStatement(
-                    ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
-            return new SqlEdgeIterable<Edge>(conn, this, stmt.executeQuery(sql));
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        }
-    }
-
-    @Override
-    public Iterable<Edge> getEdges(String key, Object value) {
-        byte[] encoded = Encoder.encodeValue(value);
-        try {
-            String sql = "SELECT DISTINCT e.id, e.vertex_out, e.vertex_in, e.label" +
-                    " FROM edges e, edge_properties ep" +
-                    " WHERE e.id = ep.edge_id AND name = ? AND value = ?";
-            PreparedStatement stmt = conn.get().prepareStatement(sql,
-                    ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
-            stmt.setString(1, key);
-            stmt.setBytes(2, encoded);
-            ResultSet resultSet = stmt.executeQuery();
-            return new SqlEdgeIterable<SqlEdge>(conn, this, resultSet);
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        }
-    }
-
-    @Override
-    public GraphQuery query() {
-        return new DefaultGraphQuery(this);
-    }
-
-    @Override
-    public void shutdown() {
-        // Since the user supplied the connection, we
-        // shouldn't close it here... but it should
-        // commit any running tx...
-        commit();
-        if (ownsDataSource)
-            dataSource.close();
     }
 
     @Override
     public void commit() {
         try {
-            conn.get().commit();
-            conn.get().close();
-            conn.remove();
+            ensureConnection();
+            connection.commit();
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
@@ -310,129 +183,274 @@ public class SqlGraph implements TransactionalGraph {
     @Override
     public void rollback() {
         try {
-            conn.get().rollback();
-            conn.get().close();
-            conn.remove();
+            ensureConnection();
+            connection.rollback();
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
     }
 
     @Override
-    @Deprecated
-    public void stopTransaction(Conclusion conclusion) {
-        if (conclusion.equals(Conclusion.FAILURE))
-            rollback();
-        else
-            commit();
+    public Features getFeatures() {
+        return FEATURES;
     }
 
     @Override
-    public String toString() {
-        return getClass().getSimpleName().toLowerCase() + " [" + dataSource.getJdbcUrl() + "]";
-    }
-
-    private Long getLongId(Object id) {
-        Long lid;
-        if (id == null) {
-            throw new IllegalArgumentException("Vertex id cannot be null");
-        }
-        try {
-            if (id instanceof String) {
-                lid = Long.parseLong((String) id);
-            } else if (id instanceof Integer) {
-                lid = (long) (Integer) id;
-            } else if (id instanceof Long) {
-                lid = (Long) id;
-            } else {
-                lid = (Long) id;
+    public Vertex addVertex(Object id) {
+        ensureConnection();
+        try (PreparedStatement stmt = statements.getAddVertex()) {
+            if (stmt.executeUpdate() == 0) {
+                return null;
             }
-        } catch (ClassCastException e) {
-            lid = null;
-        } catch (NumberFormatException e) {
-            lid = null;
-        }
-        return lid;
-    }
-
-    // Utilities
-
-    private void checkIfNeedsSchema() {
-        try {
-            conn.get().createStatement().executeQuery("SELECT 1 FROM vertices");
+            try (ResultSet rs = stmt.getGeneratedKeys()) {
+                return cache(statements.fromVertexResultSet(rs));
+            }
         } catch (SQLException e) {
-            if (e.getSQLState().startsWith("42")) { // Base table not found...
-                try {
-                    if (autoBuildSchema)
-                        buildSchema();
-                    else
-                        System.err.println("Warning: no schema found. Use graph.buildSchema() if you really" +
-                                " want to use this database.");
-                } catch (SQLException e1) {
-                    throw new SqlGraphException(e);
-                } catch (IOException e1) {
-                    throw new RuntimeException(e);
-                }
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public SqlVertex getVertex(Object id) {
+        Long realId = getId(id);
+
+        if (realId == null) {
+            return null;
+        }
+
+        WeakReference<SqlVertex> ref = vertexCache.get(realId);
+
+        SqlVertex v = ref == null ? null : ref.get();
+        if (v != null) {
+            return v;
+        }
+
+        ensureConnection();
+        try (PreparedStatement stmt = statements.getGetVertex(realId)) {
+            if (!stmt.execute()) {
+                return null;
             }
-        } finally {
+
+            try (ResultSet rs = stmt.getResultSet()) {
+                return cache(statements.fromVertexResultSet(rs));
+            }
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public void removeVertex(Vertex vertex) {
+        ensureConnection();
+        try (PreparedStatement stmt = statements.getRemoveVertex((Long) vertex.getId())) {
+            if (stmt.executeUpdate() == 0) {
+                throw new IllegalStateException("Vertex with id " + vertex.getId() + " doesn't exist.");
+            }
+            vertexCache.remove(vertex.getId());
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public CloseableIterable<Vertex> getVertices() {
+        ensureConnection();
+        try {
+            PreparedStatement stmt = statements.getAllVertices();
+
+            if (!stmt.execute()) {
+                stmt.close();
+                return ResultSetIterable.empty();
+            }
+
+            return new ResultSetIterable<Vertex>(SqlVertex.GENERATOR, this, stmt.getResultSet());
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public CloseableIterable<Vertex> getVertices(String key, Object value) {
+        return query().has(key, value).vertices();
+    }
+
+    @Override
+    public SqlEdge addEdge(Object id, Vertex outVertex, Vertex inVertex, String label) {
+        if (label == null) {
+            throw new IllegalArgumentException("null label");
+        }
+
+        ensureConnection();
+
+        try (PreparedStatement stmt = statements
+            .getAddEdge((Long) inVertex.getId(), (Long) outVertex.getId(), label)) {
+
+            if (stmt.executeUpdate() == 0) {
+                return null;
+            }
+
+            long eid = -1;
+            try (ResultSet rs = stmt.getGeneratedKeys()) {
+                if (!rs.next()) {
+                    return null;
+                }
+
+                eid = rs.getLong(1);
+            }
+
+            try (ResultSet rs = statements.getGetEdge(eid).executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+
+                return SqlEdge.GENERATOR.generate(this, rs);
+            }
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public SqlEdge getEdge(Object id) {
+        Long eid = getId(id);
+        if (eid == null) {
+            return null;
+        }
+
+        ensureConnection();
+
+        try (PreparedStatement stmt = statements.getGetEdge(eid)) {
+            if (!stmt.execute()) {
+                return null;
+            }
+
+            try (ResultSet rs = stmt.getResultSet()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                return SqlEdge.GENERATOR.generate(this, rs);
+            }
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public void removeEdge(Edge edge) {
+        ensureConnection();
+
+        try (PreparedStatement stmt = statements.getRemoveEdge((Long) edge.getId())) {
+            if (stmt.executeUpdate() == 0) {
+                throw new IllegalStateException("Edge with id " + edge.getId() + " doesn't exist.");
+            }
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public Iterable<Edge> getEdges() {
+        ensureConnection();
+
+        try {
+            PreparedStatement stmt = statements.getAllEdges();
+            return new ResultSetIterable<Edge>(SqlEdge.GENERATOR, this, stmt.executeQuery());
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    public CloseableIterable<Edge> getEdges(String key, Object value) {
+        return query().has(key, value).edges();
+    }
+
+    @Override
+    public SqlGraphQuery query() {
+        return new SqlGraphQuery(this);
+    }
+
+    @Override
+    public void shutdown() {
+        if (connection != null) {
             try {
-                conn.get().commit();
+                connection.commit();
+                connection.close();
             } catch (SQLException e) {
                 throw new SqlGraphException(e);
             }
         }
-
     }
 
-    public void buildSchema() throws SQLException, IOException {
-        String resource = dataSource.getJdbcUrl().contains("mysql") ?
-                "mysql-schema.sql" : "schema.sql";
-        buildSchema(conn.get(), resource);
+    @Override
+    public String toString() {
+        return "sqlgraph(" + dataSource.toString() + ")";
     }
 
-    /**
-     * Hacks needed for SQL compat! Urgh...
-     * @return
-     */
-    public String getJdbcUrl() {
-        return dataSource.getJdbcUrl();
+    Connection getConnection() {
+        ensureConnection();
+        return connection;
     }
 
-    public static void buildSchema(Connection conn, String schemaResource) throws SQLException, IOException {
+    Statements getStatements() {
+        ensureConnection();
+        return statements;
+    }
 
-        InputStream stream = SqlGraph.class.getClassLoader()
-                .getResourceAsStream(schemaResource);
-        try {
-            loadSqlFromInputStream(conn, stream);
-        } finally {
-            stream.close();
+    String getVerticesTableName() {
+        return verticesTableName;
+    }
+
+    String getEdgesTableName() {
+        return edgesTableName;
+    }
+
+    String getVertexPropertiesTableName() {
+        return vertexPropertiesTableName;
+    }
+
+    String getEdgePropertiesTableName() {
+        return edgePropertiesTableName;
+    }
+
+    private void ensureConnection() {
+        if (connection == null) {
+            try {
+                connection = newConnection();
+                statements = new Statements(this);
+            } catch (SQLException e) {
+                throw new SqlGraphException(e);
+            }
         }
     }
 
-    public static void loadSqlFromInputStream(Connection conn, InputStream inputStream) throws SQLException {
-        String s;
-        StringBuilder sb = new StringBuilder();
+    private Connection newConnection() throws SQLException {
+        Connection conn = dataSource.getConnection();
+        conn.setAutoCommit(false);
+        conn.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+        return conn;
+    }
 
-        try {
-            BufferedReader br = new BufferedReader(new InputStreamReader(inputStream));
-            while ((s = br.readLine()) != null) {
-                sb.append(s);
+    private Long getId(Object id) {
+        if (id == null) {
+            throw new IllegalArgumentException("null id");
+        } else if (id instanceof String) {
+            try {
+                return Long.parseLong((String) id);
+            } catch (NumberFormatException e) {
+                return null;
             }
-            br.close();
-            String[] inst = sb.toString().split(";");
-            Statement st = conn.createStatement();
-
-            for (int i = 0; i < inst.length; i++) {
-                // we ensure that there is no spaces before or after the request string
-                // in order to not execute empty statements
-                if (!inst[i].trim().equals("")) {
-                    st.executeUpdate(inst[i]);
-                }
-            }
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        } else if (id instanceof Long) {
+            return (Long) id;
+        } else {
+            return null;
         }
+    }
+    private SqlVertex cache(SqlVertex v) {
+        if (v != null) {
+            vertexCache.put(v.getId(), new WeakReference<>(v));
+        }
+
+        return v;
     }
 }
