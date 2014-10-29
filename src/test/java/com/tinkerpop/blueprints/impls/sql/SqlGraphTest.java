@@ -8,7 +8,10 @@ import com.tinkerpop.blueprints.util.io.graphson.GraphSONReaderTestSuite;
 
 import java.io.*;
 import java.lang.reflect.Method;
+import java.sql.SQLException;
 import java.util.Date;
+
+import org.h2.jdbcx.JdbcDataSource;
 
 /**
  * @author Mike Bryant (http://github.com/mikesname)
@@ -54,14 +57,11 @@ public class SqlGraphTest extends GraphTest {
         printTestPerformance("GraphQueryTestSuite", this.stopWatch());
     }
 
-/*
-    // These tests currently fail with H2 deadlock issues
     public void testTransactionalGraphTestSuite() throws Exception {
         this.stopWatch();
         doTestSuite(new TransactionalGraphTestSuite(this));
         printTestPerformance("TransactionalGraphTestSuite", this.stopWatch());
     }
-*/
 
     public void testGraphMLReaderTestSuite() throws Exception {
         this.stopWatch();
@@ -89,7 +89,16 @@ public class SqlGraphTest extends GraphTest {
     @Override
     public Graph generateGraph(String graphName) {
         String path = getGraphPath(graphName);
-        return new SqlGraph("org.h2.Driver", "jdbc:h2:" + path);
+        JdbcDataSource ds = new JdbcDataSource();
+        ds.setURL("jdbc:h2:" + path);
+        SqlGraph g = new SqlGraph(ds);
+        try {
+            g.createSchemaIfNeeded();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return g;
     }
 
     public void doTestSuite(final TestSuite testSuite) throws Exception {

@@ -2,20 +2,17 @@ Quick and dirty SQL/JDBC implementation for "Blueprints":https://github.com/tink
 
 Written solely for the sake of it.
 
-_Warning_: Current _mayor_ caveats:
+_Warning_: Current caveats:
 
-* _Munges the db schema (automatically if certain parameters are given)_ - don't use this on a database not solely created for the purpose!!!
 * Does no optimisations, like property caching, whatsoever
-* Probably leaks resources
+* Leaks resources unless you cast the _Iterable_s to _CloseableIterable_s and close them explicitly.
 * Untested with databases other than H2 and Postgres
-* Uses Java object serialization to store property values, so data is completely unreadable
-* Uses an rather heavyweight connection manager added when trying (unsuccessfully) to get transaction tests to pass
+* Only supports primitive types and strings as property values
 * Mmmn, probably lots more I haven't thought of...
 
 To try this out in the Gremlin repl you need to put some jars on the Gremlin-Groovy standalone classpath:
 
-* blueprints-sql-graph-0.1-SNAPSHOT.jar (this thing)
-* c3p0-0.9.1.2.jar (the connection pool)
+* blueprints-sql-graph-1.0.jar (this thing)
 * Your database driver, i.e. postgresql-9.1-901.jdbc4.jar, or h2.jar
 
 If you're using a Gremlin distribution compiled from Github, these extra jars need to be copied to:
@@ -27,7 +24,9 @@ h3. Loading a graph in the Gremlin repl:
 h4. H2 in-memory database:
 
 bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
-gremlin> g = new SqlGraph("org.h2.Driver", "jdbc:h2:mem:test")
+gremlin> g = new SqlGraph(["sql.datasource.class": "org.h2.jdbcx.JdbcDataSource",
+"sql.datasource.url": "jdbc:h2:mem:test"])
+gremlin> g.createSchemaIfNeeded()
 gremlin> v1 = g.addVertex()
 gremlin> v1.addEdge("knows", g.addVertex())
 gremlin> g.commit()
@@ -38,37 +37,24 @@ For server DBs you *first* have to create an empty database, with a username/pas
 
 bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
 ==> ...
-gremlin> g = new SqlGraph("org.postgresql.Driver", "jdbc:postgresql://localhost/blueprints", "blueprints", "changeme", false)
-==>sqlgraph [jdbc:postgresql://localhost/blueprints]
-gremlin> g.buildSchema()
+gremlin> g = new SqlGraph(["sql.datasource.class": "org.postgresql.ds.PGSimpleDataSource",
+"sql.datasource.serverName": "example.com", "sql.datasource.databaseName": "blueprints", "sql.datasource.user": "...",
+"sql.datasource.password": "..."])
+gremlin> g.createSchemaIfNeeded()
 ==>null
 
-The parameters for the constructor are:
+The parameter for the constructor is a map specifying the class of the datasource + any additional properties of the
+datasource and optionally the names of the tables to be used for storage:
 
-* The driver class (driver jar must be present on classpath)
-* The JDBC url
-* Database username
-* Database password
-* Whether or not to auto-create the schema if it can't find one already. This can be omitted for H2
-  because the default is true (assumes H2 DBs are throwaway). If 'false' is given, the schema can be
-  created with the @graph.buildSchema()@ function.
-
-h4. Mysql
-
-bc. gremlin> import com.tinkerpop.blueprints.impls.sql.SqlGraph
-==> ...
-gremlin> g = new SqlGraph("com.mysql.jdbc.Driver", "jdbc:mysql://localhost/blueprints", "blueprints", "changeme", false)
-==>sqlgraph [jdbc:mysql://localhost/blueprints]
-gremlin> g.buildSchema()
-==>null
-
+* _sql.datasource.class_ - the name of the datasource class from some JDBC driver on the classpath
+* _sql.datasource.*_ - any properties of the datasource can be passed using this prefix. E.g. sql.datasource.portNumber, sql.datasource.serverName, etc. See the documentation of the datasource for the list of available properties.
+* _sql.verticesTable_ - the name of the vertices table. Defaults to "vertices".
+* _sql.edgesTable_ - the name of the edges table. Defaults to "edges".
+* _sql.vertexPropertiesTable_ - the name of the table for vertex properties. Defaults to "vertex_properties".
+* _sql.edgePropertiesTable_ - the name of the table for edge properties. Defaults to "edge_properties".
 
 h3. Potential optimisations.
 
-Currently there are _no_ optimisations at all with regard to making retrieval smarter and faster,
-but some could be interesting to implement:
-
-* Caching of properties
-* Deferred insertion of properties until they can be batch inserted
-* Better property serialization
-* Smart stuff with SQL generation, or something
+This is more of a toy than an serious attempt at performant graph database backed by an RDBMS. As such, there are
+no optimizations done either at the schema level or in the codebase above declaring indexes on frequently accessed
+columns.

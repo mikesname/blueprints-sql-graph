@@ -1,50 +1,112 @@
 package com.tinkerpop.blueprints.impls.sql;
 
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.List;
+
 import com.tinkerpop.blueprints.Direction;
 import com.tinkerpop.blueprints.Edge;
 import com.tinkerpop.blueprints.Vertex;
 import com.tinkerpop.blueprints.VertexQuery;
-import com.tinkerpop.blueprints.util.DefaultVertexQuery;
-import com.tinkerpop.blueprints.util.ExceptionFactory;
-
-import java.sql.*;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * @author Mike Bryant (http://github.com/mikesname)
+ * @author Lukas Krejci
+ * @since 1.0
  */
-public class SqlVertex extends SqlElement implements Vertex {
+public final class SqlVertex extends SqlElement implements Vertex {
 
-    public static final String TABLE_NAME = "vertices";
-    public static final String PROPERTY_TABLE_NAME = "vertex_properties";
-    public static final String PROPERTY_TABLE_COL = "vertex_id";
+    public static final ElementGenerator<SqlVertex> GENERATOR = new ElementGenerator<SqlVertex>() {
+        @Override
+        public SqlVertex generate(SqlGraph graph, ResultSet rs) {
+            try {
+                return new SqlVertex(graph, rs.getLong(1));
+            } catch (SQLException e) {
+                throw new SqlGraphException("Failed to generate SqlVertex from resultset", e);
+            }
+        }
+    };
 
-    SqlVertex(ThreadLocal<Connection> conn, SqlGraph graph, Object id) {
-        super(conn, graph, id);
+    public static final List<String> DISALLOWED_PROPERTY_NAMES = Arrays.asList("id");
+
+    SqlVertex(SqlGraph graph, long id) {
+        super(graph, id);
+    }
+
+    public static String getPropertyTableForeignKey() {
+        return "vertex_id";
+    }
+
+    @Override
+    public void remove() {
+        try (PreparedStatement stmt = graph.getStatements().getRemoveVertex(getId())) {
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            throw new SqlGraphException(e);
+        }
+    }
+
+    @Override
+    protected String getPropertiesTableName() {
+        return graph.getVertexPropertiesTableName();
+    }
+
+    @Override
+    protected String getPropertyTableElementIdName() {
+        return getPropertyTableForeignKey();
+    }
+
+    @Override
+    protected List<String> getDisallowedPropertyNames() {
+        return DISALLOWED_PROPERTY_NAMES;
     }
 
     @Override
     public Iterable<Edge> getEdges(Direction direction, String... labels) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT e.id, e.vertex_in, e.vertex_out, e.label FROM edges e, vertices v WHERE v.id = ? ");
+
+        switch (direction) {
+        case IN:
+            sql.append("AND e.vertex_in = v.id ");
+            break;
+        case OUT:
+            sql.append("AND e.vertex_out = v.id ");
+            break;
+        case BOTH:
+            sql.append("AND e.vertex_in = v.id ");
+            addLabelConditions(sql, "e", labels);
+            sql.append(
+                " UNION ALL SELECT e.id, e.vertex_in, e.vertex_out, e.label FROM edges e, vertices v WHERE v.id = ? AND e.vertex_out = v.id ");
+            break;
+        }
+
+        addLabelConditions(sql, "e", labels);
+
         try {
-            PreparedStatement stmt = buildEdgeQueryStatement(direction, labels);
-            ResultSet resultSet = stmt.executeQuery();
-            try {
-                // Since we're not returning a CloseableIterable we have to
-                // store the results in memory.
-                List<Edge> edges = new ArrayList<Edge>();
-                while (resultSet.next()) {
-                    Long eid = resultSet.getLong(1);
-                    Long outV = resultSet.getLong(2);
-                    Long inV = resultSet.getLong(3);
-                    String label = resultSet.getString(4);
-                    edges.add(new SqlEdge(conn, graph, eid, outV, inV, label));
+            PreparedStatement stmt = graph.getConnection()
+                .prepareStatement(sql.toString(), ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+            stmt.setLong(1, getId());
+            int inc = 2;
+            if (direction == Direction.BOTH) {
+                for (int i = 0; i < labels.length; ++i) {
+                    stmt.setString(i + inc, labels[i]);
                 }
-                return edges;
-            } finally {
-                resultSet.close();
+
+                inc += labels.length;
+
+                stmt.setLong(inc, getId());
+
+                inc++;
             }
 
+            for (int i = 0; i < labels.length; ++i) {
+                stmt.setString(i + inc, labels[i]);
+            }
+
+            return new ResultSetIterable<Edge>(SqlEdge.GENERATOR, graph, stmt.executeQuery());
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
@@ -52,48 +114,46 @@ public class SqlVertex extends SqlElement implements Vertex {
 
     @Override
     public Iterable<Vertex> getVertices(Direction direction, String... labels) {
+        StringBuilder sql = new StringBuilder("SELECT v.id FROM vertices v, edges e WHERE ");
+
+        switch (direction) {
+        case IN:
+            sql.append("e.vertex_in = ? AND e.vertex_out = v.id ");
+            break;
+        case OUT:
+            sql.append("e.vertex_out = ? AND e.vertex_in = v.id ");
+            break;
+        case BOTH:
+            sql.append("e.vertex_in = ? AND e.vertex_out = v.id ");
+            addLabelConditions(sql, "e", labels);
+            sql.append(" UNION ALL SELECT v.id FROM vertices v, edges e WHERE e.vertex_out = ? AND e.vertex_in = v.id ");
+            break;
+        }
+
+        addLabelConditions(sql, "e", labels);
+
         try {
-            PreparedStatement stmt = buildEdgeQueryStatement(direction, labels);
-            ResultSet resultSet = stmt.executeQuery();
-            try {
-                // Since we're not returning a CloseableIterable we have to
-                // store the results in memory.
-                // NB: Probably a better way to filter duplicates than
-                // using a HashSet.
-                List<Vertex> vertices = new ArrayList<Vertex>();
-                while (resultSet.next()) {
-                    Long outV = resultSet.getLong(2);
-                    Long inV = resultSet.getLong(3);
-                    switch (direction) {
-                        case IN:
-                            vertices.add(new SqlVertex(conn, graph, outV));
-                            break;
-                        case OUT:
-                            vertices.add(new SqlVertex(conn, graph, inV));
-                            break;
-                        default: {
-                            // If the source and target vertex are the same (i.e.
-                            // it points to itself, the current vertex should be
-                            // in the result set. Otherwise it shouldn't.
-                            if (inV.equals(outV)) {
-                                vertices.add(this);
-                            } else {
-                                if (!inV.equals(id)) {
-                                    vertices.add(new SqlVertex(conn, graph, inV));
-                                }
-                                if (!outV.equals(id)) {
-                                    vertices.add(new SqlVertex(conn, graph, outV));
-                                }
-                            }
-                        }
-                    }
+            PreparedStatement stmt = graph.getConnection()
+                .prepareStatement(sql.toString(), ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
+            stmt.setLong(1, getId());
+            int inc = 2;
+            if (direction == Direction.BOTH) {
+                for (int i = 0; i < labels.length; ++i) {
+                    stmt.setString(i + inc, labels[i]);
                 }
 
-                return vertices;
-            } finally {
-                resultSet.close();
+                inc += labels.length;
+
+                stmt.setLong(inc, getId());
+
+                inc++;
             }
 
+            for (int i = 0; i < labels.length; ++i) {
+                stmt.setString(i + inc, labels[i]);
+            }
+
+            return new ResultSetIterable<Vertex>(SqlVertex.GENERATOR, graph, stmt.executeQuery());
         } catch (SQLException e) {
             throw new SqlGraphException(e);
         }
@@ -101,95 +161,27 @@ public class SqlVertex extends SqlElement implements Vertex {
 
     @Override
     public VertexQuery query() {
-        return new DefaultVertexQuery(this);
+        return new SqlVertexQuery(graph, getId());
     }
 
     @Override
-    public Edge addEdge(String label, Vertex vertex) {
-        if (label == null)
-            throw ExceptionFactory.edgeLabelCanNotBeNull();
-
-        if (vertex == null) {
-            throw new IllegalArgumentException("Vertex for addEdge is null");
-        }
-        try {
-            String sql = "INSERT INTO edges (vertex_out, vertex_in, label) VAlUES (?, ?, ?)";
-            PreparedStatement stmt = conn.get().prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-            stmt.setLong(1, (Long) id);
-            stmt.setLong(2, (Long) vertex.getId());
-            stmt.setString(3, label);
-            stmt.execute();
-            ResultSet resultSet = stmt.getGeneratedKeys();
-            try {
-                if (resultSet.next()) {
-                    Long key = resultSet.getLong(1);
-                    return new SqlEdge(conn, graph, key, id, vertex.getId(), label);
-                }
-            } finally {
-                resultSet.close();
-            }
-            throw new RuntimeException("Unable to fetch last-inserted edge ID.");
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
-        }
-
+    public SqlEdge addEdge(String label, Vertex inVertex) {
+        return graph.addEdge(null, this, inVertex, label);
     }
 
-    @Override
-    String getTbl() {
-        return TABLE_NAME;
-    }
-
-    @Override
-    String getPropTbl() {
-        return PROPERTY_TABLE_NAME;
-    }
-
-    @Override
-    String getFk() {
-        return PROPERTY_TABLE_COL;
-    }
-
-    private PreparedStatement buildEdgeQueryStatement(Direction direction, String[] labels) {
-        String labelClause = "";
-        if (labels.length == 1) {
-            labelClause = " AND label=?";
-        } else if (labels.length > 1) {
-            labelClause = " AND label IN (?";
-            for (int i = 1; i < labels.length; i++) labelClause += ", ?";
-            labelClause += ")";
+    private boolean addLabelConditions(StringBuilder sql, String tableName, String... labels) {
+        if (labels.length > 0) {
+            sql.append("AND ").append(tableName).append(".label IN (?");
         }
 
-        String sql = "SELECT id, vertex_out, vertex_in, label FROM edges WHERE ";
-        switch (direction) {
-            case IN:
-                sql = sql + ("vertex_in=? " + labelClause);
-                break;
-            case OUT:
-                sql = sql + ("vertex_out=? " + labelClause);
-                break;
-            default:
-                sql = sql + ("vertex_out=? " + labelClause + " UNION ALL " + sql + "vertex_in=? " + labelClause);
+        for (int i = 1; i < labels.length; ++i) {
+            sql.append(", ?");
         }
 
-        try {
-            PreparedStatement stmt = conn.get().prepareStatement(sql);
-            stmt.setLong(1, (Long) id);
-            int paramNum = 2;
-            for (int i = paramNum; i < paramNum + labels.length; i++) {
-                stmt.setString(i, labels[i - paramNum]);
-            }
-            paramNum += labels.length;
-            if (direction.equals(Direction.BOTH)) {
-                stmt.setLong(paramNum, (Long) id);
-                paramNum++;
-                for (int i = paramNum; i < paramNum + labels.length; i++) {
-                    stmt.setString(i, labels[i - paramNum]);
-                }
-            }
-            return stmt;
-        } catch (SQLException e) {
-            throw new SqlGraphException(e);
+        if (labels.length > 0) {
+            sql.append(") ");
         }
+
+        return labels.length > 0;
     }
 }
